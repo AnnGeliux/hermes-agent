@@ -16,6 +16,15 @@ import itertools
 
 _TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 _SKILL_TOOLS = {"skill_view", "skill_manage"}
+# Insights counts describe the VISIBLE transcript. Rows superseded by a rewind or by a
+# compaction generation (``active = 0, compacted = 0``) are not display rows: they are stale
+# copies of messages the transcript already shows once, so counting them reports every
+# generation of a rewritten conversation again. This is the same scope every other transcript
+# reader applies (``hermes_state_messages._DISPLAY_ACTIVE_CLAUSE``, search, timeline, repair),
+# so the overview tallies and the Top Tools/Top Skills rankings reconcile with the transcript
+# a resume/show displays. Anchored in the WHERE clause — never appended after a ``GROUP BY``,
+# where SQLite silently absorbs it into the last grouping expression.
+_DISPLAY_VIEW = " AND (m.active = 1 OR m.compacted = 1)"
 
 
 def _fmt_est_cost(est_cost: float) -> str:
@@ -109,7 +118,7 @@ class InsightsEngine:
     _ASSISTANT_CALLS = (
         f" FROM messages m INDEXED BY {_MESSAGES_ASSISTANT_CALLS_INDEX}"
         " JOIN sessions s ON s.id = m.session_id"
-        " WHERE s.started_at >= ?"
+        " WHERE s.started_at >= ?" + _DISPLAY_VIEW
     )
     _GET_TOOL_CALLS_ALL, _GET_TOOL_CALLS_WITH_SOURCE = _scoped(
         "SELECT m.session_id, m.tool_calls" + _ASSISTANT_CALLS,
@@ -125,7 +134,8 @@ class InsightsEngine:
         """SELECT m.session_id, m.tool_name, COUNT(*) as count
                    FROM messages m
                    JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?""",
+                   WHERE s.started_at >= ?"""
+        + _DISPLAY_VIEW,
         """
                      AND m.role = 'tool' AND m.tool_name IS NOT NULL
                    GROUP BY m.session_id, m.tool_name""",
@@ -138,7 +148,8 @@ class InsightsEngine:
                      SUM(CASE WHEN m.role = 'tool' THEN 1 ELSE 0 END) as tool_messages
                    FROM messages m
                    JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?""",
+                   WHERE s.started_at >= ?"""
+        + _DISPLAY_VIEW,
     )
     _GET_MODEL_USAGE_ALL, _GET_MODEL_USAGE_WITH_SOURCE = _scoped(
         "SELECT u.session_id, u.model, u.billing_provider, u.billing_base_url,"
