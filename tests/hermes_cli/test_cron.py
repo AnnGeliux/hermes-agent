@@ -673,3 +673,45 @@ class TestSlashCronRunSkipped:
         out = capsys.readouterr().out
         assert "Job is paused/disabled; resume it before running." in out
         assert "Triggered" not in out and "next scheduler tick" not in out
+
+
+class TestCorruptedStoreFailsCleanly:
+    """`hermes cron <verb>` must render an unreadable store as ONE clean line and exit 1 (#136723).
+
+    ``cron.jobs`` fails CLOSED on an unparseable jobs.json by raising RuntimeError (#6797); before
+    the dispatch wrapper in ``cron_command`` that escaped as a raw traceback on every read verb.
+    The store must never be treated as empty either: an unknown store is not "No scheduled jobs",
+    and the unparseable file is left exactly as it was.
+    """
+
+    _EDIT_ARGS = dict(job_id="job-1", schedule=None, prompt=None, name=None, deliver=None,
+                      repeat=None, skill=None, skills=None, clear_skills=False, add_skills=None,
+                      remove_skills=None, script=None, workdir=None, no_agent=None)
+    _CASES = {
+        "list": Namespace(cron_command="list", all=True, json=False),
+        "status": Namespace(cron_command="status"),
+        "doctor": Namespace(cron_command="doctor"),
+        "tick": Namespace(cron_command="tick"),
+        "edit": Namespace(cron_command="edit", **_EDIT_ARGS),
+    }
+    _EXPECTED = ("Error: Cron database corrupted and unrepairable: "
+                 "Expecting value: line 1 column 10 (char 9)")
+
+    def _corrupt_store(self, tmp_cron_dir):
+        cron_dir = tmp_cron_dir / "cron"
+        cron_dir.mkdir(parents=True, exist_ok=True)
+        (cron_dir / "jobs.json").write_text('{"jobs": ', encoding="utf-8")
+
+    @pytest.mark.parametrize("verb", sorted(_CASES))
+    def test_read_verb_reports_corruption_cleanly(self, tmp_cron_dir, capsys, verb):
+        self._corrupt_store(tmp_cron_dir)
+
+        rc = cron_command(self._CASES[verb])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.err.splitlines() == [self._EXPECTED]
+        assert "Traceback" not in captured.out + captured.err
+        # Fail closed (#6797): unknown store, not empty store — and nothing rewrote it.
+        assert "No scheduled jobs" not in captured.out
+        assert (tmp_cron_dir / "cron" / "jobs.json").read_text(encoding="utf-8") == '{"jobs": '

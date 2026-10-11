@@ -993,7 +993,17 @@ def cron_command(args):
     subcmd = getattr(args, 'cron_command', None)
     handler = _CRON_SUBCOMMANDS.get("list" if subcmd is None else subcmd)
     if handler is not None:
-        return handler(args)
+        try:
+            return handler(args)
+        except RuntimeError as exc:
+            # cron.jobs fails CLOSED on an unreadable/unparseable store by raising RuntimeError
+            # (#6797), and every read verb reaches it (list/status/doctor via list_jobs, edit via
+            # resolve_job_ref, tick via the due scan). At the CLI boundary that is one clean line
+            # plus exit 1 — never a traceback (#136723) and never a silent "no jobs": the store is
+            # unknown, not empty. Only RuntimeError lands here; any other exception is a genuine
+            # bug and keeps its traceback.
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
     print(f"Unknown cron command: {subcmd}\n"
           "Usage: hermes cron [list|create|edit|pause|resume|run|remove|status|runs|doctor|tick]")
     sys.exit(1)
