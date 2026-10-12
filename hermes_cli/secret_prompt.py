@@ -49,7 +49,14 @@ def masked_secret_prompt(prompt: str, *, mask: str = "*") -> str:
 
     Falls back to ``getpass.getpass`` when stdin/stdout are not interactive or when raw terminal
     handling is unavailable.
+
+    On Windows with a redirected stdin (``< NUL``, ``< /dev/null``, a pipe) ``getpass`` is
+    ``win_getpass``: it ignores stdin, writes the prompt straight to the console and blocks in
+    ``msvcrt.getwch()`` forever instead of raising ``EOFError`` (#136736).  That case raises
+    ``EOFError`` directly — the same outcome the POSIX path produces when stdin is exhausted.
     """
+    if _windows_console_read_would_block():
+        raise EOFError("EOF when reading a line")
     if not _stream_is_tty(sys.stdin) or not _stream_is_tty(sys.stdout):
         return getpass.getpass(prompt)
     masked = _masked_secret_prompt_windows if os.name == "nt" else _masked_secret_prompt_posix
@@ -65,6 +72,38 @@ def _stream_is_tty(stream) -> bool:
     try:
         return bool(stream.isatty())
     except Exception:
+        return False
+
+
+def stdin_is_console() -> bool:
+    """True only when stdin can actually deliver an interactive, non-blocking line."""
+    if not _stream_is_tty(sys.stdin):
+        return False
+    return not _windows_console_read_would_block()
+
+
+def _windows_console_read_would_block() -> bool:
+    """True when ``getpass``/``msvcrt`` would read the console and block forever.
+
+    Windows' ``getpass`` is ``win_getpass``: it ignores stdin and calls ``msvcrt.getwch()``.
+    ``sys.stdin.isatty()`` is True for the NUL device (a character device) and for a console,
+    so a ``< /dev/null`` redirect still looked interactive and ``hermes auth add`` hung on the
+    console instead of failing on exhausted stdin (#136736).  ``GetConsoleMode`` succeeds only
+    for a real console handle, so it tells the two apart.  Non-Windows and stream doubles with
+    no real ``fileno()`` return False, leaving the plain ``getpass`` fallback untouched.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        mode = ctypes.c_uint()
+        return not ctypes.windll.kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode))
+    except (AttributeError, OSError, ValueError):
+        # A stream double or a closed fd has no console handle to query — the same
+        # "cannot read here" outcome the guard exists to report, not an error.
         return False
 
 

@@ -7,6 +7,24 @@ from hermes_cli.colors import Colors, color
 from hermes_cli.secret_prompt import masked_secret_prompt
 
 
+class PromptAborted(Exception):
+    """A required interactive prompt could not be answered (EOF, closed stdin, Ctrl-C)."""
+
+
+def read_or_abort(reader, prompt_text: str, *, default: str = "") -> str:
+    """Stripped answer from *reader*; raise ``PromptAborted`` instead of a traceback.
+
+    ``reader`` is ``input``, ``line_input`` or ``masked_secret_prompt`` — passed in rather than
+    imported so each call site keeps referencing its own module global, which tests patch.
+    A blank answer yields ``default`` (or ""); EOF/Ctrl-C abort the command (#136692, #136736).
+    """
+    try:
+        value = reader(prompt_text).strip()
+    except (EOFError, KeyboardInterrupt):
+        raise PromptAborted() from None
+    return value or default
+
+
 def print_info(text: str) -> None:
     print(color(f"  {text}", Colors.DIM))
 

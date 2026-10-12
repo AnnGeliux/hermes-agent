@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from pm import install_hint
-from hermes_cli.cli_output import line_input
+from hermes_cli.cli_output import PromptAborted, line_input, read_or_abort
 
 import math
 import sys
@@ -24,7 +24,7 @@ from hermes_cli.auth import PROVIDER_REGISTRY
 from hermes_cli.auth_plugin_providers import (
     dispatch_plugin_auth, is_refreshable_oauth_provider, plugin_missing_auth_handler_error)
 from hermes_constants import OPENROUTER_BASE_URL
-from hermes_cli.secret_prompt import masked_secret_prompt
+from hermes_cli.secret_prompt import masked_secret_prompt, stdin_is_console
 
 
 # Providers that support OAuth login in addition to API keys.
@@ -359,14 +359,27 @@ def _unsuppress_provider_sources(provider: str) -> None:
 
 
 def _add_api_key_credential(args, provider: str, pool) -> PooledCredential:
-    token = ((getattr(args, "api_key", None) or "").strip()
-             or masked_secret_prompt("Paste your API key: ").strip())
+    token = (getattr(args, "api_key", None) or "").strip()
+    if not token:
+        # No --api-key on the command line: the key must come from a real prompt.  EOF/Ctrl-C
+        # aborts cleanly instead of dumping a traceback (#136736).
+        try:
+            token = read_or_abort(masked_secret_prompt, "Paste your API key: ")
+        except PromptAborted:
+            raise SystemExit(
+                "No API key provided (stdin is closed or the prompt was interrupted); "
+                "pass --api-key to run non-interactively.") from None
     if not token:
         raise SystemExit("No API key provided.")
     default_label = f"api-key-{len(pool.entries()) + 1}"
     label = (getattr(args, "label", None) or "").strip()
-    if not label and sys.stdin.isatty():
-        label = line_input(f"Label (optional, default: {default_label}): ").strip()
+    # ``sys.stdin.isatty()`` is True for the Windows NUL device, so ``< /dev/null`` used to take
+    # this interactive branch and crash in ``input()``; ``stdin_is_console()`` is console-exact.
+    if not label and stdin_is_console():
+        try:
+            label = read_or_abort(line_input, f"Label (optional, default: {default_label}): ")
+        except PromptAborted:
+            label = ""
     label = label or default_label
     entry = PooledCredential(
         provider=provider, id=uuid.uuid4().hex[:6], label=label, auth_type=AUTH_TYPE_API_KEY,
